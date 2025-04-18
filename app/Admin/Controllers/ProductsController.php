@@ -1,112 +1,97 @@
 <?php
 
-namespace App\Admin\Controllers;
+namespace App\Http\Controllers;
 
+use Illuminate\Http\Request;
 use App\Models\Product;
-
-use Encore\Admin\Form;
-use Encore\Admin\Grid;
-use Encore\Admin\Facades\Admin;
-use Encore\Admin\Layout\Content;
-use App\Http\Controllers\Controller;
-use Encore\Admin\Controllers\ModelForm;
 
 class ProductsController extends Controller
 {
-    use ModelForm;
-
-    /**
-     * Index interface.
-     *
-     * @return Content
-     */
-    public function index()
+    public function index(Request $request)
     {
-        return Admin::content(function (Content $content) {
-            $content->header('商品列表');
-            $content->body($this->grid());
-        });
-    }
-
-    /**
-     * Edit interface.
-     *
-     * @param $id
-     * @return Content
-     */
-    public function edit($id)
-    {
-        return Admin::content(function (Content $content) use ($id) {
-            $content->header('编辑商品');
-            $content->body($this->form()->edit($id));
-        });
-    }
-
-    /**
-     * Create interface.
-     *
-     * @return Content
-     */
-    public function create()
-    {
-        return Admin::content(function (Content $content) {
-            $content->header('创建商品');
-            $content->body($this->form());
-        });
-    }
-
-    /**
-     * Make a grid builder.
-     *
-     * @return Grid
-     */
-    protected function grid()
-    {
-        return Admin::grid(Product::class, function (Grid $grid) {
-            $grid->id('ID')->sortable();
-            $grid->title('商品名称');
-            $grid->on_sale('已上架')->display(function ($value) {
-                return $value ? '是' : '否';
+        // 创建一个查询构造器
+        $builder = Product::query()->where('on_sale', true);
+        // 判断是否有提交 search 参数，如果有就赋值给 $search 变量
+        // search 参数用来模糊搜索商品
+        if ($search = $request->input('search', '')) {
+            $like = '%'.$search.'%';
+            // 模糊搜索商品标题、商品详情、SKU 标题、SKU描述
+            $builder->where(function ($query) use ($like) {
+                $query->where('title', 'like', $like)
+                    ->orWhere('description', 'like', $like)
+                    ->orWhereHas('skus', function ($query) use ($like) {
+                        $query->where('title', 'like', $like)
+                            ->orWhere('description', 'like', $like);
+                    });
             });
-            $grid->price('价格');
-            $grid->rating('评分');
-            $grid->sold_count('销量');
-            $grid->review_count('评论数');
+        }
 
-            $grid->actions(function ($actions) {
-                $actions->disableDelete();
-            });
-        });
+        // 是否有提交 order 参数，如果有就赋值给 $order 变量
+        // order 参数用来控制商品的排序规则
+        if ($order = $request->input('order', '')) {
+            // 是否是以 _asc 或者 _desc 结尾
+            if (preg_match('/^(.+)_(asc|desc)$/', $order, $m)) {
+                // 如果字符串的开头是这 3 个字符串之一，说明是一个合法的排序值
+                if (in_array($m[1], ['price', 'sold_count', 'rating'])) {
+                    // 根据传入的排序值来构造排序参数
+                    $builder->orderBy($m[1], $m[2]);
+                }
+            }
+        }
+
+        $products = $builder->paginate(16);
+
+        return view('products.index', [
+            'products' => $products,
+            'filters'  => [
+                'search' => $search,
+                'order'  => $order,
+            ],
+        ]);
     }
 
-    /**
-     * Make a form builder.
-     *
-     * @return Form
-     */
-    protected function form()
+    public function show(Product $product, Request $request)
     {
-        // 创建一个表单
-        return Admin::form(Product::class, function (Form $form) {
-            // 创建一个输入框，第一个参数 title 是模型的字段名，第二个参数是该字段描述
-            $form->text('title', '商品名称')->rules('required');
-            // 创建一个选择图片的框
-            $form->image('image', '封面图片')->rules('required|image');
-            // 创建一个富文本编辑器
-            $form->editor('description', '商品描述')->rules('required');
-            // 创建一组单选框
-            $form->radio('on_sale', '上架')->options(['1' => '是', '0'=> '否'])->default('0');
-            // 直接添加一对多的关联模型
-            $form->hasMany('skus', function (Form\NestedForm $form) {
-                $form->text('title', 'SKU 名称')->rules('required');
-                $form->text('description', 'SKU 描述')->rules('required');
-                $form->text('price', '单价')->rules('required|numeric|min:0.01');
-                $form->text('stock', '剩余库存')->rules('required|integer|min:0');
-            });
-            // 定义事件回调，当模型即将保存时会触发这个回调
-            $form->saving(function (Form $form) {
-                $form->model()->price = collect($form->skus)->min('price');
-            });
-        });
+        if (!$product->on_sale) {
+            throw new InvalidRequestException('商品未上架');
+        }
+
+        $favored = false;
+        // 用户未登录时返回的是 null，已登录时返回的是对应的用户对象
+        if($user = $request->user()) {
+            // 从当前用户已收藏的商品中搜索 id 为当前商品 id 的商品
+            // boolval() 函数用于把值转为布尔值
+            $favored = boolval($user->favoriteProducts()->find($product->id));
+        }
+
+        return view('products.show', ['product' => $product, 'favored' => $favored]);
     }
+
+    public function favor(Product $product, Request $request)
+    {
+        $user = $request->user();
+        if ($user->favoriteProducts()->find($product->id)) {
+            return [];
+        }
+
+        $user->favoriteProducts()->attach($product);
+
+        return [];
+    }
+
+    public function disfavor(Product $product, Request $request)
+    {
+        $user = $request->user();
+        $user->favoriteProducts()->detach($product);
+
+        return [];
+    }
+
+    public function favorites(Request $request)
+    {
+        $products = $request->user()->favoriteProducts()->paginate(16);
+
+        return view('products.favorites', ['products' => $products]);
+    }
+
 }
